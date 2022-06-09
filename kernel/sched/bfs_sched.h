@@ -9,6 +9,13 @@
  * This is the main, per-CPU runqueue data structure.
  * This data should only be modified by the local cpu.
  */
+struct DRAMRegs {
+	u64 traffic[8192];
+	s64 virtualTime_pid[8192];
+	s64 virtualTime_coreId[4];
+	u64 pid_coreId[4];
+};
+
 struct rq {
 	struct task_struct *curr, *idle, *stop;
 	struct mm_struct *prev_mm;

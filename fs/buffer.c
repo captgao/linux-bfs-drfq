@@ -1702,7 +1702,8 @@ int __block_write_full_page(struct inode *inode, struct page *page,
 
 	head = create_page_buffers(page, inode,
 					(1 << BH_Dirty)|(1 << BH_Uptodate));
-
+	wbc->pasid = inode->pasid;
+	wbc->pasid_enabled = inode->pasid_enabled;
 	/*
 	 * Be very careful.  We have no exclusion from __set_page_dirty_buffers
 	 * here, and the (potentially unmapped) buffers may become dirty at
@@ -2049,6 +2050,10 @@ static int __block_commit_write(struct inode *inode, struct page *page,
 	struct buffer_head *bh, *head;
 
 	bh = head = page_buffers(page);
+	page->pasid = task_pid_nr(current);
+	page->pasid_enabled = 1;
+	inode->pasid = task_pid_nr(current);
+	inode->pasid_enabled = 1;
 	blocksize = bh->b_size;
 
 	block_start = 0;
@@ -3078,6 +3083,8 @@ static int submit_bh_wbc(int op, int op_flags, struct buffer_head *bh,
 	if (wbc) {
 		wbc_init_bio(wbc, bio);
 		wbc_account_io(wbc, bh->b_page, bh->b_size);
+		bio->pasid = wbc->pasid;
+		bio->pasid_enabled = wbc->pasid;
 	}
 
 	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
@@ -3098,7 +3105,10 @@ static int submit_bh_wbc(int op, int op_flags, struct buffer_head *bh,
 	if (buffer_prio(bh))
 		op_flags |= REQ_PRIO;
 	bio_set_op_attrs(bio, op, op_flags);
-
+	if(wbc) {
+		bio->pasid = wbc->pasid;
+		bio->pasid_enabled = wbc->pasid;
+	}
 	submit_bio(bio);
 	return 0;
 }

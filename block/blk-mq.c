@@ -1327,6 +1327,8 @@ static blk_qc_t blk_mq_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_T_NONE;
 
 	rq = blk_mq_map_request(q, bio, &data);
+	rq->pasid = bio->pasid;
+	rq->pasid_enabled = bio->pasid_enabled;
 	if (unlikely(!rq))
 		return BLK_QC_T_NONE;
 

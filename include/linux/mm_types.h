@@ -190,6 +190,8 @@ struct page {
 #endif
 		struct kmem_cache *slab_cache;	/* SL[AU]B: Pointer to slab */
 	};
+	unsigned int pasid;
+	unsigned int pasid_enabled;
 
 #ifdef CONFIG_MEMCG
 	struct mem_cgroup *mem_cgroup;

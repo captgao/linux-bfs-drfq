@@ -483,7 +483,10 @@ struct nvme_rw_command {
 	__u8			flags;
 	__u16			command_id;
 	__le32			nsid;
-	__u64			rsvd2;
+	union{
+		__u64			rsvd2;
+		__le32			pasid[2];
+	};
 	__le64			metadata;
 	union nvme_data_ptr	dptr;
 	__le64			slba;

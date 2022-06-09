@@ -410,7 +410,10 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 	int ret = 0;
 	int nr_submitted = 0;
 	int nr_to_submit = 0;
-
+	if(io->io_bio) {
+		io->io_bio->pasid = page->pasid;
+		io->io_bio->pasid_enabled = page->pasid_enabled;
+	}
 	blocksize = 1 << inode->i_blkbits;
 
 	BUG_ON(!PageLocked(page));
@@ -453,8 +456,11 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 			/* A hole? We can safely clear the dirty bit */
 			if (!buffer_mapped(bh))
 				clear_buffer_dirty(bh);
-			if (io->io_bio)
+			if (io->io_bio){
+				io->io_bio->pasid = page->pasid;
+				io->io_bio->pasid_enabled = page->pasid_enabled;
 				ext4_io_submit(io);
+			}
 			continue;
 		}
 		if (buffer_new(bh)) {
@@ -477,6 +483,8 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 			ret = PTR_ERR(data_page);
 			if (ret == -ENOMEM && wbc->sync_mode == WB_SYNC_ALL) {
 				if (io->io_bio) {
+					io->io_bio->pasid = page->pasid;
+					io->io_bio->pasid_enabled = page->pasid_enabled;
 					ext4_io_submit(io);
 					congestion_wait(BLK_RW_ASYNC, HZ/50);
 				}

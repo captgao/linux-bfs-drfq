@@ -80,6 +80,9 @@ struct bio {
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
 	struct bio_set		*bi_pool;
+	
+	unsigned int pasid;
+	unsigned int pasid_enabled;
 
 	/*
 	 * We can inline a number of vecs at the end of the bio, to avoid

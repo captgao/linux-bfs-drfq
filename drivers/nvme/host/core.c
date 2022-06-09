@@ -293,6 +293,18 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 
 	memset(cmnd, 0, sizeof(*cmnd));
 	cmnd->rw.opcode = (rq_data_dir(req) ? nvme_cmd_write : nvme_cmd_read);
+	if(cmnd->rw.opcode == nvme_cmd_write) {
+		if(req->pasid_enabled == 1) {
+			cmnd->rw.pasid[0] = cpu_to_le32(req->pasid);
+			cmnd->rw.pasid[1] = cpu_to_le32(0x11223344);
+		} else {
+			cmnd->rw.pasid[0] = cpu_to_le32(task_pid_nr(current));
+			cmnd->rw.pasid[1] = cpu_to_le32(0x11223344);
+		}
+	} else {
+		cmnd->rw.pasid[0] = cpu_to_le32(task_pid_nr(current));
+		cmnd->rw.pasid[1] = cpu_to_le32(0x11223344);
+	}
 	cmnd->rw.command_id = req->tag;
 	cmnd->rw.nsid = cpu_to_le32(ns->ns_id);
 	cmnd->rw.slba = cpu_to_le64(nvme_block_nr(ns, blk_rq_pos(req)));

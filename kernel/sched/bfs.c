@@ -135,6 +135,8 @@
 
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
 
+struct DRAMRegs* dram_regs = NULL;
+
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS CPU scheduler v0.512 by Con Kolivas.\n");
@@ -2036,7 +2038,9 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * do an early lockdep release here:
 	 */
 	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
-
+	if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	dram_regs->pid_coreId[smp_processor_id()] = next->pid;
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
