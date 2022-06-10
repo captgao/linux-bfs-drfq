@@ -24,7 +24,7 @@
  *  2007-07-01  Group scheduling enhancements by Srivatsa Vaddagiri
  *  2007-11-29  RT balancing improvements by Steven Rostedt, Gregory Haskins,
  *              Thomas Gleixner, Mike Kravetz
- *  2009-08-13	Brainfuck deadline scheduling policy by Con Kolivas deletes
+ *  2009-08-13	Brainfuck _deadline_ scheduling policy by Con Kolivas deletes
  *              a whole lot of those previous things.
  */
 
@@ -132,7 +132,7 @@
 #define MS_TO_US(TIME)		((TIME) << 10)
 #define NS_TO_MS(TIME)		((TIME) >> 20)
 #define NS_TO_US(TIME)		((TIME) >> 10)
-
+#define CONFIG_SMP
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
 
 struct DRAMRegs* dram_regs = NULL;
@@ -162,7 +162,7 @@ int sched_interactive __read_mostly = 1;
 int sched_iso_cpu __read_mostly = 70;
 
 /*
- * The relative length of deadline for each priority(nice) level.
+ * The relative length of _deadline_ for each priority(nice) level.
  */
 static int prio_ratios[NICE_WIDTH] __read_mostly;
 
@@ -471,23 +471,23 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	grq_unlock_irq();
 }
 
-static inline bool deadline_before(u64 deadline, u64 time)
+static inline bool deadline_before(u64 a, u64 time)
 {
-	return (deadline < time);
+	return (a < time);
 }
 
-static inline bool deadline_after(u64 deadline, u64 time)
+static inline bool deadline_after(u64 a, u64 time)
 {
-	return (deadline > time);
+	return (a > time);
 }
 
 /*
- * Deadline is "now" in niffies + (offset by priority). Setting the deadline
+ * _Deadline_ is "now" in niffies + (offset by priority). Setting the _deadline_
  * is the key to everything. It distributes cpu fairly amongst tasks of the
  * same nice value, it proportions cpu according to nice level, it means the
- * task that last woke up the longest ago has the earliest deadline, thus
+ * task that last woke up the longest ago has the earliest _deadline_, thus
  * ensuring that interactive tasks get low latency on wake up. The CPU
- * proportion works out to the square of the virtual deadline difference, so
+ * proportion works out to the square of the virtual _deadline_ difference, so
  * this equation will give nice 19 3% CPU compared to nice 0.
  */
 static inline u64 prio_deadline_diff(int user_prio)
@@ -587,7 +587,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	 * according to priority. The skiplist will put tasks of the same
 	 * key inserted later in FIFO order. Tasks of sched normal, batch
 	 * and idleprio are sorted according to their deadlines. Idleprio
-	 * tasks are offset by an impossibly large deadline value ensuring
+	 * tasks are offset by an impossibly large _deadline_ value ensuring
 	 * they get sorted into last positions, but still according to their
 	 * own deadlines. This creates a "landscape" of skiplists running
 	 * from priority 0 realtime in first place to the lowest priority
@@ -620,8 +620,8 @@ static inline void requeue_task(struct task_struct *p)
 }
 
 /*
- * Returns the relative length of deadline all compared to the shortest
- * deadline which is that of nice -20.
+ * Returns the relative length of _deadline_ all compared to the shortest
+ * _deadline_ which is that of nice -20.
  */
 static inline int task_prio_ratio(struct task_struct *p)
 {
@@ -674,7 +674,7 @@ static unsigned long rq_load_avg(struct rq *rq)
 static const cpumask_t *thread_cpumask(int cpu);
 
 /* Find the best real time priority running on any SMT siblings of cpu and if
- * none are running, the static priority of the best deadline task running.
+ * none are running, the static priority of the best _deadline_ task running.
  * The lookups to the other runqueues is done lockless as the occasional wrong
  * value would be harmless. */
 static int best_smt_bias(struct rq *this_rq)
@@ -1239,15 +1239,15 @@ EXPORT_SYMBOL_GPL(kick_process);
  * prio PRIO_LIMIT so it is always preempted.
  */
 static inline bool
-can_preempt(struct task_struct *p, int prio, u64 deadline)
+can_preempt(struct task_struct *p, int prio, u64 ddl)
 {
 	/* Better static priority RT task or better policy preemption */
 	if (p->prio < prio)
 		return true;
 	if (p->prio > prio)
 		return false;
-	/* SCHED_NORMAL, BATCH and ISO will preempt based on deadline */
-	if (!deadline_before(p->deadline, deadline))
+	/* SCHED_NORMAL, BATCH and ISO will preempt based on _deadline_ */
+	if (!deadline_before(p->deadline, ddl))
 		return false;
 	return true;
 }
@@ -1724,7 +1724,7 @@ void wake_up_new_task(struct task_struct *p)
 	p->state = TASK_RUNNING;
 
 	/*
-	 * Reinit new task deadline as its creator deadline could have changed
+	 * Reinit new task _deadline_ as its creator _deadline_ could have changed
 	 * since call to dup_task_struct().
 	 */
 	p->deadline = rq->rq_deadline;
@@ -1751,7 +1751,7 @@ void wake_up_new_task(struct task_struct *p)
 	 * matter since that's the same as being 0. current's time_slice is
 	 * actually in rq_time_slice when it's running, as is its last_ran
 	 * value. rq->rq_deadline is only modified within schedule() so it
-	 * is always equal to current->deadline.
+	 * is always equal to current->_deadline_.
 	 */
 	p->last_ran = rq->rq_last_ran;
 	if (likely(rq_curr->policy != SCHED_FIFO)) {
@@ -1759,8 +1759,8 @@ void wake_up_new_task(struct task_struct *p)
 		if (unlikely(rq->rq_time_slice < RESCHED_US)) {
 			/*
 			 * Forking task has run out of timeslice. Reschedule it and
-			 * start its child with a new time slice and deadline. The
-			 * child will end up running first because its deadline will
+			 * start its child with a new time slice and _deadline_. The
+			 * child will end up running first because its _deadline_ will
 			 * be slightly earlier.
 			 */
 			rq->rq_time_slice = 0;
@@ -2608,6 +2608,8 @@ ts_account:
 
 	rq->rq_last_ran = rq->clock_task;
 	rq->timekeep_clock = rq->clock;
+	printk("cpu %d: cl %lld cl_t %lld last %lld tk %lld\n", 
+		cpu_of(rq), rq->clock, rq->clock_task, rq->rq_last_ran, rq->timekeep_clock);
 }
 
 /*
@@ -3062,7 +3064,7 @@ static inline void preempt_latency_stop(int val) { }
 
 /*
  * The time_slice is only refilled when it is empty and that is when we set a
- * new deadline.
+ * new _deadline_.
  */
 static void time_slice_expired(struct task_struct *p)
 {
@@ -3090,7 +3092,7 @@ static void time_slice_expired(struct task_struct *p)
  * point rescheduling when there's so little time left. SCHED_BATCH tasks
  * have been flagged be not latency sensitive and likely to be fully CPU
  * bound so every time they're rescheduled they have their time_slice
- * refilled, but get a new later deadline to have little effect on
+ * refilled, but get a new later _deadline_ to have little effect on
  * SCHED_NORMAL tasks.
 
  */
@@ -3184,12 +3186,12 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 				earliest_deadline = dl;
 				edt = p;
 				/* We continue even though we've found the earliest
-				 * deadline task as the locality offset means there
+				 * _deadline_ task as the locality offset means there
 				 * may be a better candidate after it. */
 				continue;
 			}
 		}
-		/* We've encountered the best deadline local task */
+		/* We've encountered the best _deadline_ local task */
 		edt = p;
 		break;
 	}
@@ -3752,7 +3754,7 @@ out_unlock:
 #endif
 
 /*
- * Adjust the deadline for when the priority is to change, before it's
+ * Adjust the _deadline_ for when the priority is to change, before it's
  * changed.
  */
 static inline void adjust_deadline(struct task_struct *p, int new_prio)
@@ -4673,7 +4675,7 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
  * sys_sched_yield - yield the current processor to other threads.
  *
  * This function yields the current CPU to other tasks. It does this by
- * scheduling away the current task. If it still has the earliest deadline
+ * scheduling away the current task. If it still has the earliest _deadline_
  * it will be scheduled again as the next task.
  *
  * Return: 0.
