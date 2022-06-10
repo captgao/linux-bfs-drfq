@@ -1750,7 +1750,7 @@ void wake_up_new_task(struct task_struct *p)
 	 * resulting in more scheduling fairness. If it's negative, it won't
 	 * matter since that's the same as being 0. current's time_slice is
 	 * actually in rq_time_slice when it's running, as is its last_ran
-	 * value. rq->rq_deadline is only modified within schedule() so it
+	 * value. rq->_rq_deadline is only modified within schedule() so it
 	 * is always equal to current->_deadline_.
 	 */
 	p->last_ran = rq->rq_last_ran;
