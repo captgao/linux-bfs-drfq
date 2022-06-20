@@ -1482,6 +1482,7 @@ struct task_struct {
 	u64 deadline;
 	skiplist_node node; /* Skip list node */
 	u64 last_ran;
+	u64 exec_start;
 	u64 sched_time; /* sched_clock time spent running */
 #ifdef CONFIG_SMT_NICE
 	int smt_bias; /* Policy/nice level bias across smt siblings */

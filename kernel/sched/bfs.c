@@ -197,7 +197,7 @@ struct global_rq {
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
-
+	u64 global_deadline;
 	skiplist_node node;
 	skiplist *sl;
 };
@@ -948,14 +948,45 @@ static void update_load_avg(struct rq *rq)
 	}
 	rq->load_update = rq->clock;
 }
+//get min_vruntime, enter with grq lock
+u64 global_rq_deadline(void) {	
 
+	skiplist_node *node = &grq.node;
+	u64 _deadline = 0xFFFFFFFFFFFFFFFFUL;
+	int pid = -1;
+	u64 maxddl = 0;
+	while ((node = node->next[0]) != &grq.node) {
+		struct task_struct *p = node->value;
+		if(p == NULL)
+			continue;
+		if(p->state != TASK_RUNNING)
+			continue;
+		if(p->deadline < _deadline) {
+			_deadline = p->deadline;
+			pid = p->pid;
+		}
+		if(p->deadline > maxddl)
+			maxddl = p->deadline;
+	}
+	_deadline += 1;
+	if(_deadline > grq.global_deadline)
+		grq.global_deadline = _deadline;
+	// printk("global rq_deadline %lld from pid %d, when max is %d\n", grq.global_deadline, pid, maxddl);
+	return grq.global_deadline;
+}
 /*
  * activate_task - move a task to the runqueue. Enter with grq locked.
  */
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
 	update_clocks(rq);
-
+	p->deadline = global_rq_deadline();
+		if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	u64 traffic = dram_regs->traffic[p->pid];
+	dram_regs->traffic[p->pid] = 0;
+	u64 traffic_to_delta = traffic >> 1 + traffic >> 3;
+	p->deadline += traffic_to_delta;
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
 	 * milliseconds-range estimation of the amount of time that the task
@@ -1727,8 +1758,11 @@ void wake_up_new_task(struct task_struct *p)
 	 * Reinit new task _deadline_ as its creator _deadline_ could have changed
 	 * since call to dup_task_struct().
 	 */
-	p->deadline = rq->rq_deadline;
-
+	p->deadline = global_rq_deadline();
+		if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	dram_regs->traffic[p->pid] = 0;
+	// printk("new task ddl %lld pid %d cpu %d\n", p->deadline, p->pid, smp_processor_id());
 	/* The new task might not be able to run on the same CPU as rq->curr */
 	if (unlikely(needs_other_cpu(p, task_cpu(p)))) {
 		set_task_cpu(p, cpumask_any(tsk_cpus_allowed(p)));
@@ -2008,7 +2042,8 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
-
+	// printk("ddl: prev(%d) %lld next(%d) %lld\n", prev->pid, prev->deadline,
+	//  next->pid,next->deadline);
 	prepare_task_switch(rq, prev, next);
 
 	mm = next->mm;
@@ -2608,8 +2643,6 @@ ts_account:
 
 	rq->rq_last_ran = rq->clock_task;
 	rq->timekeep_clock = rq->clock;
-	printk("cpu %d: cl %lld cl_t %lld last %lld tk %lld\n", 
-		cpu_of(rq), rq->clock, rq->clock_task, rq->rq_last_ran, rq->timekeep_clock);
 }
 
 /*
@@ -3069,7 +3102,6 @@ static inline void preempt_latency_stop(int val) { }
 static void time_slice_expired(struct task_struct *p)
 {
 	p->time_slice = timeslice();
-	p->deadline = grq.niffies + task_deadline_diff(p);
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;
@@ -3098,6 +3130,37 @@ static void time_slice_expired(struct task_struct *p)
  */
 static inline void check_deadline(struct task_struct *p)
 {
+	struct rq *rq = cpu_rq(smp_processor_id());
+
+	u64 clock = rq->clock;
+	// printk("In time_slice_expired: %lld %lld %lld %d\n", 
+	// 	clock, p->exec_start, clock - p->exec_start, p->pid);
+	u64 delta = clock - p->exec_start;
+	if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	u64 traffic = dram_regs->traffic[p->pid];
+	dram_regs->traffic[p->pid] = 0;
+	// max bandwidth 4.267 B/s, 1 delta  = 1.5ns, n_cpus = 4, so traffic * 5/8 to delta
+	u64 traffic_to_delta =  traffic >> 1 + traffic >> 3;
+	if(traffic_to_delta > delta) {
+		delta = traffic_to_delta;
+		printk("Delta from mem %lld\n", delta);
+	} else {
+		if(delta > 3000000) {
+			printk("Delta from CPU %lld\n", delta);
+		}
+	}
+	p->deadline += delta; // = grq.niffies + task_deadline_diff(p);
+	dram_regs->virtualTime_pid[p->pid] = p->deadline << 10;
+
+	p->exec_start = clock;
+	if(rq->rq_deadline <= p->deadline)
+		rq->rq_deadline = p->deadline;
+	else {
+		// printk("cpu %d pid %d rq_deadline %lld p->deadline %lld\n",
+		// 	smp_processor_id(), p->pid, rq->rq_deadline, p->deadline);
+	}
+	// printk("deadline %lld cpu %d\n", p->deadline, smp_processor_id());
 	if (p->time_slice < RESCHED_US || batch_task(p))
 		time_slice_expired(p);
 }
@@ -3161,10 +3224,10 @@ found_middle:
 static inline struct
 task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 {
-	skiplist_node *node = &grq.node;
 	struct task_struct *edt = idle;
 	u64 earliest_deadline = ~0ULL;
 
+	skiplist_node *node = &grq.node;
 	while ((node = node->next[0]) != &grq.node) {
 		struct task_struct *p = node->value;
 
@@ -3258,7 +3321,6 @@ static inline void schedule_debug(struct task_struct *prev)
 static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
 	rq->rq_time_slice = p->time_slice;
-	rq->rq_deadline = p->deadline;
 	rq->rq_last_ran = p->last_ran = rq->clock_task;
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
@@ -3451,7 +3513,13 @@ static void __sched notrace __schedule(bool preempt)
 	if (idle != prev) {
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
-		prev->deadline = rq->rq_deadline;
+		// if(rq->rq_deadline <= prev->deadline) {
+		// 	rq->rq_deadline = prev->deadline;
+		// } else {
+		// 	printk("in __schedule cpu %d pid %d rq->ddl %lld prev->ddl %lld\n",
+		// 		smp_processor_id(), prev->pid, rq->rq_deadline, prev->deadline);
+		// }
+		// printk("rq with prev->deadline %lld pid%d cpu%d\n", rq->rq_deadline, prev->pid, smp_processor_id());
 		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
 		return_task(prev, rq, deactivate);
@@ -3487,6 +3555,7 @@ static void __sched notrace __schedule(bool preempt)
 		grq.nr_switches++;
 		prev->on_cpu = false;
 		next->on_cpu = true;
+		next->exec_start = rq->clock;
 		rq->curr = next;
 		++*switch_count;
 
@@ -3759,7 +3828,7 @@ out_unlock:
  */
 static inline void adjust_deadline(struct task_struct *p, int new_prio)
 {
-	p->deadline += static_deadline_diff(new_prio) - task_deadline_diff(p);
+	// p->deadline += static_deadline_diff(new_prio) - task_deadline_diff(p);
 }
 
 void set_user_nice(struct task_struct *p, long nice)
@@ -4816,6 +4885,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	yielded = 1;
 	if (p->deadline > rq->rq_deadline)
 		p->deadline = rq->rq_deadline;
+	printk("p->deadline %lld rq_deadline %lld", p->deadline, rq->rq_deadline);
 	p->time_slice += rq->rq_time_slice;
 	rq->rq_time_slice = 0;
 	if (p->time_slice > timeslice())
@@ -7059,6 +7129,7 @@ void __init sched_init_smp(void)
 			printk(KERN_DEBUG "BFS LOCALITY CPU %d to %d: %d\n", cpu, other_cpu, rq->cpu_locality[other_cpu]);
 		}
 	}
+	dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	sched_smp_initialized = true;
 }
 #else
@@ -7113,6 +7184,7 @@ void __init sched_init(void)
 	raw_spin_lock_init(&grq.lock);
 	grq.nr_running = grq.nr_uninterruptible = grq.nr_switches = 0;
 	grq.niffies = 0;
+	grq.global_deadline = 0;
 	grq.last_jiffy = jiffies;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
