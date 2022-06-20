@@ -985,9 +985,10 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	u64 traffic = dram_regs->traffic[p->pid];
 	dram_regs->traffic[p->pid] = 0;
-	u64 traffic_to_delta = traffic >> 1 + traffic >> 3;
+	u64 traffic_to_delta = (traffic >> 1) + (traffic >> 3);
+	printk("Added traffic delta %lld\n", traffic_to_delta)
 	p->deadline += traffic_to_delta;
-	dram_regs->virtualTime_pid[p->pid] = p->deadline;
+	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
 	 * milliseconds-range estimation of the amount of time that the task
@@ -1763,7 +1764,7 @@ void wake_up_new_task(struct task_struct *p)
 	if(dram_regs == NULL) 
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	dram_regs->traffic[p->pid] = 0;
-	dram_regs->virtualTime_pid[p->pid] = p->deadline;
+	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
 	// printk("new task ddl %lld pid %d cpu %d\n", p->deadline, p->pid, smp_processor_id());
 	/* The new task might not be able to run on the same CPU as rq->curr */
 	if (unlikely(needs_other_cpu(p, task_cpu(p)))) {
@@ -3143,17 +3144,17 @@ static inline void check_deadline(struct task_struct *p)
 	u64 traffic = dram_regs->traffic[p->pid];
 	dram_regs->traffic[p->pid] = 0;
 	// max bandwidth 4.267 B/s, 1 delta  = 1.5ns, n_cpus = 4, so traffic * 5/8 to delta
-	u64 traffic_to_delta =  traffic >> 1 + traffic >> 3;
+	u64 traffic_to_delta =  (traffic >> 1) + (traffic >> 3);
 	if(traffic_to_delta > delta) {
 		delta = traffic_to_delta;
 		printk("Delta from mem %lld\n", delta);
 	} else {
 		if(delta > 3000000) {
-			printk("Delta from CPU %lld\n", delta);
+			printk("Delta from CPU %lld, while traffic %lld %lld\n", delta, traffic_to_delta, traffic);
 		}
 	}
 	p->deadline += delta; // = grq.niffies + task_deadline_diff(p);
-	dram_regs->virtualTime_pid[p->pid] = p->deadline << 10;
+	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
 
 	p->exec_start = clock;
 	if(rq->rq_deadline <= p->deadline)
