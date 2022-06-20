@@ -986,7 +986,7 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	u64 traffic = dram_regs->traffic[p->pid];
 	dram_regs->traffic[p->pid] = 0;
 	u64 traffic_to_delta = (traffic >> 1) + (traffic >> 3);
-	printk("Added traffic delta %lld\n", traffic_to_delta)
+	printk("Added traffic delta %lld\n", traffic_to_delta);
 	p->deadline += traffic_to_delta;
 	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
 	/*
