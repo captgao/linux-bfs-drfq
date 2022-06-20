@@ -981,12 +981,13 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 {
 	update_clocks(rq);
 	p->deadline = global_rq_deadline();
-		if(dram_regs == NULL) 
+	if(dram_regs == NULL) 
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	u64 traffic = dram_regs->traffic[p->pid];
 	dram_regs->traffic[p->pid] = 0;
 	u64 traffic_to_delta = traffic >> 1 + traffic >> 3;
 	p->deadline += traffic_to_delta;
+	dram_regs->virtualTime_pid[p->pid] = p->deadline;
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
 	 * milliseconds-range estimation of the amount of time that the task
@@ -1759,9 +1760,10 @@ void wake_up_new_task(struct task_struct *p)
 	 * since call to dup_task_struct().
 	 */
 	p->deadline = global_rq_deadline();
-		if(dram_regs == NULL) 
+	if(dram_regs == NULL) 
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	dram_regs->traffic[p->pid] = 0;
+	dram_regs->virtualTime_pid[p->pid] = p->deadline;
 	// printk("new task ddl %lld pid %d cpu %d\n", p->deadline, p->pid, smp_processor_id());
 	/* The new task might not be able to run on the same CPU as rq->curr */
 	if (unlikely(needs_other_cpu(p, task_cpu(p)))) {
