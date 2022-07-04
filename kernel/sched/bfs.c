@@ -134,9 +134,10 @@
 #define NS_TO_US(TIME)		((TIME) >> 10)
 #define CONFIG_SMP
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
-
+#define MAX_DELTA_DIFF 40000000
+#define ACTIVATE_DELTA_DIFF 40000000
 struct DRAMRegs* dram_regs = NULL;
-
+#define BFS_DEBUG 0
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS CPU scheduler v0.512 by Con Kolivas.\n");
@@ -197,6 +198,7 @@ struct global_rq {
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
+	struct task_struct* running_tasks[16];
 	u64 global_deadline;
 	skiplist_node node;
 	skiplist *sl;
@@ -293,6 +295,10 @@ static inline void niffy_diff(s64 *niff_diff, int jiff_diff)
 		*niff_diff = min_diff;
 }
 
+s64 getVirtualTimeOffset(struct task_struct *p) {
+	//return (s64)(p->deadline - grq.global_deadline) * 1500;
+	return p->deadline; // * 1500;
+}
 #ifdef CONFIG_SMP
 static inline int cpu_of(struct rq *rq)
 {
@@ -481,6 +487,13 @@ static inline bool deadline_after(u64 a, u64 time)
 	return (a > time);
 }
 
+static inline u64 read_traffic_delta(struct task_struct* p) {
+	if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	u64 traffic = dram_regs->traffic[p->pid];
+	p->traffic += traffic;
+	return traffic;
+}
 /*
  * _Deadline_ is "now" in niffies + (offset by priority). Setting the _deadline_
  * is the key to everything. It distributes cpu fairly amongst tasks of the
@@ -951,28 +964,76 @@ static void update_load_avg(struct rq *rq)
 //get min_vruntime, enter with grq lock
 u64 global_rq_deadline(void) {	
 
-	skiplist_node *node = &grq.node;
 	u64 _deadline = 0xFFFFFFFFFFFFFFFFUL;
 	int pid = -1;
-	u64 maxddl = 0;
-	while ((node = node->next[0]) != &grq.node) {
-		struct task_struct *p = node->value;
-		if(p == NULL)
-			continue;
-		if(p->state != TASK_RUNNING)
-			continue;
+	// u64 maxddl = 0;
+	// while ((node = node->next[0]) != &grq.node) {
+	// 	struct task_struct *p = node->value;
+	// 	if(p == NULL)
+	// 		continue;
+	// 	if(p->state != TASK_RUNNING)
+	// 		continue;
+	// 	if(p->deadline < _deadline && p->deadline > grq.global_deadline) {
+	// 		_deadline = p->deadline;
+	// 		pid = p->pid;
+	// 	}
+	// 	if(p->deadline > maxddl)
+	// 		maxddl = p->deadline;
+	// }
+	int i;
+	for(i = 0; i < 4; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* p = rq->curr;
+		if(p == NULL || p == rq->idle) continue;
 		if(p->deadline < _deadline) {
 			_deadline = p->deadline;
 			pid = p->pid;
 		}
-		if(p->deadline > maxddl)
-			maxddl = p->deadline;
 	}
 	_deadline += 1;
 	if(_deadline > grq.global_deadline)
 		grq.global_deadline = _deadline;
-	// printk("global rq_deadline %lld from pid %d, when max is %d\n", grq.global_deadline, pid, maxddl);
+	if(pid != -1 && BFS_DEBUG)
+		printk("_deadline %lld global rq_deadline %lld from pid  %d\n", _deadline, grq.global_deadline, pid);
 	return grq.global_deadline;
+}
+
+void update_curr(struct task_struct *p) {
+
+	u64 clock = grq.niffies;
+	u64 delta = clock - p->exec_start;
+	if(delta < 0) {
+		printk("pid %d delta %lld\n", p->pid, delta);
+		delta = 0;
+	}
+	u64 traffic_to_delta = read_traffic_delta(p);
+	// if(p->pid > 810) {
+	// 	printk("pid %d grq %lld delta %lld traffic_to_delta %lld\n",
+	// 		p->pid, grq.niffies, delta, traffic_to_delta);
+	// }
+	// if(delta > 3000000 )//&& BFS_DEBUG) 
+	// 		printk("pid %d Delta from CPU %lld ddl %lld, while traffic %lld\n"
+	// 			, p->pid, delta, p->deadline + delta, traffic_to_delta);
+	// max bandwidth 4.267 B/s, 1 delta  = 1.5ns, n_cpus = 4, so traffic * 5/8 to delta
+	if(traffic_to_delta > delta) {
+		delta = traffic_to_delta;
+		// if(BFS_DEBUG)
+		// printk("pid %d Delta from mem %lld ddl %lld\n", p->pid, delta, p->deadline + delta);
+	}
+	p->deadline += delta;
+	p->exec_start = clock;
+}
+
+void update_running_deadline(void) {
+	int i;
+	for(i = 0; i < 4; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* p = rq->curr;
+		// printk("update_running_deadline pid %d cpu %d\n", p->pid, i);
+		if(p == NULL || p == rq->idle) continue;
+		update_curr(p);
+		dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
+	}
 }
 /*
  * activate_task - move a task to the runqueue. Enter with grq locked.
@@ -980,15 +1041,22 @@ u64 global_rq_deadline(void) {
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
 	update_clocks(rq);
-	p->deadline = global_rq_deadline();
-	if(dram_regs == NULL) 
-		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
-	u64 traffic = dram_regs->traffic[p->pid];
-	dram_regs->traffic[p->pid] = 0;
-	u64 traffic_to_delta = (traffic >> 1) + (traffic >> 3);
-	printk("Added traffic delta %lld\n", traffic_to_delta);
+	u64 global_deadline = global_rq_deadline();
+	u64 traffic_to_delta = read_traffic_delta(p);
+	// if(p->pid > 800 && traffic_to_delta > 0) {
+	// 	printk("In activate_task %d added traffic %lld at time %lld\n", p->pid, traffic_to_delta, grq.niffies);
+	// }
 	p->deadline += traffic_to_delta;
-	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
+	if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
+		p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
+
+	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
+
+	if(traffic_to_delta != 0 && BFS_DEBUG)
+		printk("pid %d Added traffic delta %lld ddl %lld\n",p->pid, traffic_to_delta, p->deadline);
+	
+	
+	update_running_deadline();
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
 	 * milliseconds-range estimation of the amount of time that the task
@@ -1621,7 +1689,8 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->stimescaled =
 	p->sched_time =
 	p->stime_pc =
-	p->utime_pc = 0;
+	p->utime_pc =
+	p->traffic = 0;
 	skiplist_node_init(&p->node);
 
 	/*
@@ -1764,7 +1833,7 @@ void wake_up_new_task(struct task_struct *p)
 	if(dram_regs == NULL) 
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	dram_regs->traffic[p->pid] = 0;
-	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
+	dram_regs->virtualTime_pid[p->pid] =getVirtualTimeOffset(p);
 	// printk("new task ddl %lld pid %d cpu %d\n", p->deadline, p->pid, smp_processor_id());
 	/* The new task might not be able to run on the same CPU as rq->curr */
 	if (unlikely(needs_other_cpu(p, task_cpu(p)))) {
@@ -2076,9 +2145,12 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * do an early lockdep release here:
 	 */
 	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
+	prev->on_cpu = 0;
+	next->on_cpu = 1;
 	if(dram_regs == NULL) 
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	dram_regs->pid_coreId[smp_processor_id()] = next->pid;
+	dram_regs->virtualTime_coreId[smp_processor_id()] = getVirtualTimeOffset(next);
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
@@ -3131,41 +3203,24 @@ static void time_slice_expired(struct task_struct *p)
  * SCHED_NORMAL tasks.
 
  */
+
+
 static inline void check_deadline(struct task_struct *p)
 {
 	struct rq *rq = cpu_rq(smp_processor_id());
+	update_curr(p);
 
-	u64 clock = rq->clock;
-	// printk("In time_slice_expired: %lld %lld %lld %d\n", 
-	// 	clock, p->exec_start, clock - p->exec_start, p->pid);
-	u64 delta = clock - p->exec_start;
-	if(dram_regs == NULL) 
-		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
-	u64 traffic = dram_regs->traffic[p->pid];
-	dram_regs->traffic[p->pid] = 0;
-	// max bandwidth 4.267 B/s, 1 delta  = 1.5ns, n_cpus = 4, so traffic * 5/8 to delta
-	u64 traffic_to_delta =  (traffic >> 1) + (traffic >> 3);
-	if(traffic_to_delta > delta) {
-		delta = traffic_to_delta;
-		printk("Delta from mem %lld\n", delta);
-	} else {
-		if(delta > 3000000) {
-			printk("Delta from CPU %lld, while traffic %lld %lld\n", delta, traffic_to_delta, traffic);
-		}
-	}
-	p->deadline += delta; // = grq.niffies + task_deadline_diff(p);
-	dram_regs->virtualTime_pid[p->pid] = (p->deadline - grq.global_deadline) << 10;
+	u64 global_deadline = global_rq_deadline();
+	if(p->deadline > global_deadline + MAX_DELTA_DIFF)
+		p->deadline = global_deadline + MAX_DELTA_DIFF;
+	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 
-	p->exec_start = clock;
+	
 	if(rq->rq_deadline <= p->deadline)
 		rq->rq_deadline = p->deadline;
-	else {
-		// printk("cpu %d pid %d rq_deadline %lld p->deadline %lld\n",
-		// 	smp_processor_id(), p->pid, rq->rq_deadline, p->deadline);
-	}
-	// printk("deadline %lld cpu %d\n", p->deadline, smp_processor_id());
-	if (p->time_slice < RESCHED_US || batch_task(p))
+	if (p->time_slice < RESCHED_US || batch_task(p)) {
 		time_slice_expired(p);
+	}
 }
 
 #define BITOP_WORD(nr)		((nr) / BITS_PER_LONG)
@@ -3243,9 +3298,8 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 
 		if (!sched_interactive) {
 			int tcpu;
-
 			if ((tcpu = task_cpu(p)) != cpu) {
-				u64 dl = p->deadline << locality_diff(tcpu, rq);
+				u64 dl = p->deadline; // << locality_diff(tcpu, rq);
 
 				if (!deadline_before(dl, earliest_deadline))
 					continue;
@@ -3558,7 +3612,7 @@ static void __sched notrace __schedule(bool preempt)
 		grq.nr_switches++;
 		prev->on_cpu = false;
 		next->on_cpu = true;
-		next->exec_start = rq->clock;
+		next->exec_start = grq.niffies;
 		rq->curr = next;
 		++*switch_count;
 
@@ -4888,7 +4942,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	yielded = 1;
 	if (p->deadline > rq->rq_deadline)
 		p->deadline = rq->rq_deadline;
-	printk("p->deadline %lld rq_deadline %lld", p->deadline, rq->rq_deadline);
+	printk("In yield p->deadline %lld rq_deadline %lld", p->deadline, rq->rq_deadline);
 	p->time_slice += rq->rq_time_slice;
 	rq->rq_time_slice = 0;
 	if (p->time_slice > timeslice())
@@ -7187,7 +7241,7 @@ void __init sched_init(void)
 	raw_spin_lock_init(&grq.lock);
 	grq.nr_running = grq.nr_uninterruptible = grq.nr_switches = 0;
 	grq.niffies = 0;
-	grq.global_deadline = 0;
+	grq.global_deadline = ACTIVATE_DELTA_DIFF;
 	grq.last_jiffy = jiffies;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;

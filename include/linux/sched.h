@@ -1484,6 +1484,7 @@ struct task_struct {
 	u64 last_ran;
 	u64 exec_start;
 	u64 sched_time; /* sched_clock time spent running */
+	u64 traffic;
 #ifdef CONFIG_SMT_NICE
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif

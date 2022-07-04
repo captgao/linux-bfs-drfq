@@ -728,6 +728,7 @@ static inline void check_stack_usage(void) {}
 void do_exit(long code)
 {
 	struct task_struct *tsk = current;
+	printk("pid %d ended with traffic %lld\n", current->pid, current->traffic);
 	int group_dead;
 	TASKS_RCU(int tasks_rcu_i);
 

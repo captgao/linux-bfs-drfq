@@ -1555,6 +1555,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 
 	/* ok, now we should be set up.. */
 	p->pid = pid_nr(pid);
+	printk("pid %d init\n", p->pid);
 	if (clone_flags & CLONE_THREAD) {
 		p->exit_signal = -1;
 		p->group_leader = current->group_leader;
