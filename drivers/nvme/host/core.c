@@ -295,13 +295,16 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 	cmnd->rw.opcode = (rq_data_dir(req) ? nvme_cmd_write : nvme_cmd_read);
 	if(cmnd->rw.opcode == nvme_cmd_write) {
 		if(req->pasid_enabled == 1) {
+			// printk("In nvme_setup_rw: pasid from REQ %d\n", req->pasid);
 			cmnd->rw.pasid[0] = cpu_to_le32(req->pasid);
 			cmnd->rw.pasid[1] = cpu_to_le32(0x11223344);
 		} else {
+			// printk("In nvme_setup_rw: pasid from CUR %d\n", task_pid_nr(current));
 			cmnd->rw.pasid[0] = cpu_to_le32(task_pid_nr(current));
 			cmnd->rw.pasid[1] = cpu_to_le32(0x11223344);
 		}
 	} else {
+		// printk("In nvme_setup_rw: pasid from CUR %d\n", task_pid_nr(current));
 		cmnd->rw.pasid[0] = cpu_to_le32(task_pid_nr(current));
 		cmnd->rw.pasid[1] = cpu_to_le32(0x11223344);
 	}
@@ -309,6 +312,10 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 	cmnd->rw.nsid = cpu_to_le32(ns->ns_id);
 	cmnd->rw.slba = cpu_to_le64(nvme_block_nr(ns, blk_rq_pos(req)));
 	cmnd->rw.length = cpu_to_le16((blk_rq_bytes(req) >> ns->lba_shift) - 1);
+
+	if(current) {
+		current->blk_traffic += blk_rq_bytes(req);
+	}
 
 	if (ns->ms) {
 		switch (ns->pi_type) {

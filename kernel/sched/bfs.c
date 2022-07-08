@@ -998,6 +998,16 @@ u64 global_rq_deadline(void) {
 	return grq.global_deadline;
 }
 
+u64 nice_delta(struct task_struct *p, u64 delta) {
+	if(p->weight == 0) {
+		return delta;
+	} else if(p->weight < 0) {
+		int x = 0 - p->weight + 1;
+		return delta / x;
+	} else {
+		return delta * (p->weight + 1);
+	}
+}
 void update_curr(struct task_struct *p) {
 
 	u64 clock = grq.niffies;
@@ -1020,7 +1030,7 @@ void update_curr(struct task_struct *p) {
 		// if(BFS_DEBUG)
 		// printk("pid %d Delta from mem %lld ddl %lld\n", p->pid, delta, p->deadline + delta);
 	}
-	p->deadline += delta;
+	p->deadline += nice_delta(p, delta);
 	p->exec_start = clock;
 }
 
@@ -1046,7 +1056,7 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	// if(p->pid > 800 && traffic_to_delta > 0) {
 	// 	printk("In activate_task %d added traffic %lld at time %lld\n", p->pid, traffic_to_delta, grq.niffies);
 	// }
-	p->deadline += traffic_to_delta;
+	p->deadline += nice_delta(p, traffic_to_delta);
 	if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
 		p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
 
@@ -1690,6 +1700,8 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->sched_time =
 	p->stime_pc =
 	p->utime_pc =
+	p->blk_traffic =
+	p->weight = 
 	p->traffic = 0;
 	skiplist_node_init(&p->node);
 
@@ -3890,46 +3902,48 @@ static inline void adjust_deadline(struct task_struct *p, int new_prio)
 
 void set_user_nice(struct task_struct *p, long nice)
 {
-	int new_static, old_static;
-	unsigned long flags;
-	struct rq *rq;
+	printk("set_user_nice pid %d nice %d\n", p->pid, (int)nice);
+	p->weight = (int)nice;
+// 	int new_static, old_static;
+// 	unsigned long flags;
+// 	struct rq *rq;
 
-	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
-		return;
-	new_static = NICE_TO_PRIO(nice);
-	/*
-	 * We have to be careful, if called from sys_setpriority(),
-	 * the task might be in the middle of scheduling on another CPU.
-	 */
-	rq = time_task_grq_lock(p, &flags);
-	/*
-	 * The RT priorities are set via sched_setscheduler(), but we still
-	 * allow the 'normal' nice value to be set - but as expected
-	 * it wont have any effect on scheduling until the task is
-	 * not SCHED_NORMAL/SCHED_BATCH:
-	 */
-	if (has_rt_policy(p)) {
-		p->static_prio = new_static;
-		goto out_unlock;
-	}
+// 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
+// 		return;
+// 	new_static = NICE_TO_PRIO(nice);
+// 	/*
+// 	 * We have to be careful, if called from sys_setpriority(),
+// 	 * the task might be in the middle of scheduling on another CPU.
+// 	 */
+// 	rq = time_task_grq_lock(p, &flags);
+// 	/*
+// 	 * The RT priorities are set via sched_setscheduler(), but we still
+// 	 * allow the 'normal' nice value to be set - but as expected
+// 	 * it wont have any effect on scheduling until the task is
+// 	 * not SCHED_NORMAL/SCHED_BATCH:
+// 	 */
+// 	if (has_rt_policy(p)) {
+// 		p->static_prio = new_static;
+// 		goto out_unlock;
+// 	}
 
-	adjust_deadline(p, new_static);
-	old_static = p->static_prio;
-	p->static_prio = new_static;
-	p->prio = effective_prio(p);
+// 	adjust_deadline(p, new_static);
+// 	old_static = p->static_prio;
+// 	p->static_prio = new_static;
+// 	p->prio = effective_prio(p);
 
-	if (task_queued(p)) {
-		dequeue_task(p);
-		enqueue_task(p, rq);
-		if (new_static < old_static)
-			try_preempt(p, rq);
-	} else if (task_running(p)) {
-		reset_rq_task(rq, p);
-		if (old_static < new_static)
-			resched_task(p);
-	}
-out_unlock:
-	task_grq_unlock(p, &flags);
+// 	if (task_queued(p)) {
+// 		dequeue_task(p);
+// 		enqueue_task(p, rq);
+// 		if (new_static < old_static)
+// 			try_preempt(p, rq);
+// 	} else if (task_running(p)) {
+// 		reset_rq_task(rq, p);
+// 		if (old_static < new_static)
+// 			resched_task(p);
+// 	}
+// out_unlock:
+// 	task_grq_unlock(p, &flags);
 }
 EXPORT_SYMBOL(set_user_nice);
 
@@ -3947,7 +3961,6 @@ int can_nice(const struct task_struct *p, const int nice)
 		capable(CAP_SYS_NICE));
 }
 
-#ifdef __ARCH_WANT_SYS_NICE
 
 /*
  * sys_nice - change the priority of the current process.
@@ -3965,6 +3978,11 @@ SYSCALL_DEFINE1(nice, int, increment)
 	 * We don't have to worry. Conceptually one call occurs first
 	 * and we have a single winner.
 	 */
+	printk("--------NICE SYSTEM CALL %d----------\n", current->pid);
+	current->weight = increment;
+	printk("pid %d weight set to %d", current->pid, current->weight);
+	return 0;
+
 
 	increment = clamp(increment, -NICE_WIDTH, NICE_WIDTH);
 	nice = task_nice(current) + increment;
@@ -3980,9 +3998,6 @@ SYSCALL_DEFINE1(nice, int, increment)
 	set_user_nice(current, nice);
 	return 0;
 }
-
-#endif
-
 /**
  * task_prio - return the priority value of a given task.
  * @p: the task in question.

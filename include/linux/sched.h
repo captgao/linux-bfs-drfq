@@ -1476,6 +1476,7 @@ struct task_struct {
 #endif
 	int on_rq;
 	int prio, static_prio, normal_prio;
+	int weight;
 	unsigned int rt_priority;
 #ifdef CONFIG_SCHED_BFS
 	int time_slice;
@@ -1485,6 +1486,7 @@ struct task_struct {
 	u64 exec_start;
 	u64 sched_time; /* sched_clock time spent running */
 	u64 traffic;
+	u64 blk_traffic;
 #ifdef CONFIG_SMT_NICE
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif
