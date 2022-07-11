@@ -271,7 +271,9 @@ int __weak arch_sd_sibling_asym_packing(void)
 #else
 struct rq *uprq;
 #endif /* CONFIG_SMP */
-
+u64 scheduler_time(void) {
+	return grq.niffies;
+}
 static inline void update_rq_clock(struct rq *rq);
 
 /*

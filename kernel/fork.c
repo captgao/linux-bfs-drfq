@@ -76,7 +76,7 @@
 #include <linux/compiler.h>
 #include <linux/sysctl.h>
 #include <linux/kcov.h>
-
+#include <linux/sched.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
@@ -1555,7 +1555,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 
 	/* ok, now we should be set up.. */
 	p->pid = pid_nr(pid);
-	printk("pid %d init\n", p->pid);
+	printk("pid %d init at %lld\n", p->pid, scheduler_time());
 	if (clone_flags & CLONE_THREAD) {
 		p->exit_signal = -1;
 		p->group_leader = current->group_leader;

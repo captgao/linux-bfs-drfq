@@ -3536,5 +3536,5 @@ void cpufreq_add_update_util_hook(int cpu, struct update_util_data *data,
 				     unsigned long util, unsigned long max));
 void cpufreq_remove_update_util_hook(int cpu);
 #endif /* CONFIG_CPU_FREQ */
-
+u64 scheduler_time(void);
 #endif
