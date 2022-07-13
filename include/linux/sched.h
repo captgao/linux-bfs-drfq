@@ -1477,6 +1477,7 @@ struct task_struct {
 	int on_rq;
 	int prio, static_prio, normal_prio;
 	int weight;
+	int is_wakeup;
 	unsigned int rt_priority;
 #ifdef CONFIG_SCHED_BFS
 	int time_slice;

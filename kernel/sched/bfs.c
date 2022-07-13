@@ -1055,15 +1055,12 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	update_clocks(rq);
 	u64 global_deadline = global_rq_deadline();
 	u64 traffic_to_delta = read_traffic_delta(p);
-	// if(p->pid > 800 && traffic_to_delta > 0) {
-	// 	printk("In activate_task %d added traffic %lld at time %lld\n", p->pid, traffic_to_delta, grq.niffies);
-	// }
 	p->deadline += nice_delta(p, traffic_to_delta);
 	if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
 		p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
 
 	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
-
+	p->is_wakeup = 1;
 	if(traffic_to_delta != 0 && BFS_DEBUG)
 		printk("pid %d Added traffic delta %lld ddl %lld\n",p->pid, traffic_to_delta, p->deadline);
 	
@@ -1704,6 +1701,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->utime_pc =
 	p->blk_traffic =
 	p->weight = 
+	p->is_wakeup =
 	p->traffic = 0;
 	skiplist_node_init(&p->node);
 
@@ -3222,11 +3220,14 @@ static void time_slice_expired(struct task_struct *p)
 static inline void check_deadline(struct task_struct *p)
 {
 	struct rq *rq = cpu_rq(smp_processor_id());
+	u64 prev_deadline = p->deadline;
 	update_curr(p);
 
 	u64 global_deadline = global_rq_deadline();
 	if(p->deadline > global_deadline + MAX_DELTA_DIFF)
 		p->deadline = global_deadline + MAX_DELTA_DIFF;
+	if(p->deadline < prev_deadline)
+		p->deadline = prev_deadline;
 	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 
 	
@@ -3328,6 +3329,14 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		/* We've encountered the best _deadline_ local task */
 		edt = p;
 		break;
+	}
+	if(edt->is_wakeup) {
+		if(edt->deadline > grq.global_deadline + 20000000) {
+			// printk("delayed pid %d\n", edt->pid);
+			return idle;
+		} else {
+			edt->is_wakeup = 0;
+		}
 	}
 	if (likely(edt != idle))
 		take_task(cpu, edt);
