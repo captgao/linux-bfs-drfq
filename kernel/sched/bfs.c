@@ -3286,7 +3286,16 @@ found_first:
 found_middle:
 	return result + __ffs(tmp);
 }
-
+bool all_idle(void) {
+	int i;
+	for(i = 0; i < 4; i++) {
+		struct rq* rq = cpu_rq(i);
+		if(rq == NULL) continue;
+		if(rq->curr == NULL || rq->curr == rq->idle) continue;
+		return false;
+	}
+	return true;
+}
 /*
  * Task selection with skiplists is a simple matter of picking off the first
  * task in the sorted list, an O(1) operation. The only time it takes longer
@@ -3331,7 +3340,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		break;
 	}
 	if(edt->is_wakeup) {
-		if(edt->deadline > grq.global_deadline + 20000000) {
+		if(unlikely((edt->deadline > grq.global_deadline + 20000000) && !all_idle())) {
 			// printk("delayed pid %d\n", edt->pid);
 			return idle;
 		} else {
