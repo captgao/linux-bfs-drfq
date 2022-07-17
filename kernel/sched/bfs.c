@@ -198,7 +198,6 @@ struct global_rq {
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
-	struct task_struct* running_tasks[16];
 	u64 global_deadline;
 	skiplist_node node;
 	skiplist *sl;
@@ -1064,6 +1063,7 @@ u64 base_deadline(struct task_struct *p) {
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
 	update_clocks(rq);
+	update_running_deadline();
 	u64 global_deadline = global_rq_deadline();
 	u64 traffic_to_delta = read_traffic_delta(p);
 	// p->deadline += nice_delta(p, traffic_to_delta);
@@ -1076,7 +1076,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 		printk("pid %d Added traffic delta %lld ddl %lld\n",p->pid, traffic_to_delta, p->deadline);
 	
 
-	update_running_deadline();
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
 	 * milliseconds-range estimation of the amount of time that the task
