@@ -14,6 +14,7 @@ struct DRAMRegs {
 	s64 virtualTime_pid[8192];
 	s64 virtualTime_coreId[4];
 	u64 pid_coreId[4];
+	u64 saturation;
 };
 
 struct rq {
