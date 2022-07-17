@@ -299,7 +299,7 @@ static inline void niffy_diff(s64 *niff_diff, int jiff_diff)
 
 s64 getVirtualTimeOffset(struct task_struct *p) {
 	//return (s64)(p->deadline - grq.global_deadline) * 1500;
-	return p->deadline; // * 1500;
+	return p->deadline >> 22; // * 1500;
 }
 #ifdef CONFIG_SMP
 static inline int cpu_of(struct rq *rq)
@@ -887,7 +887,10 @@ static inline void resched_suitable_idle(struct task_struct *p)
 
 static inline int locality_diff(int cpu, struct rq *rq)
 {
-	return rq->cpu_locality[cpu];
+	// return rq->cpu_locality[cpu];
+	if(rq == cpu_rq(cpu))
+		return 0;
+	else return 10;
 }
 #else /* CONFIG_SMP */
 static inline void set_cpuidle_map(int cpu)
@@ -1010,7 +1013,7 @@ u64 nice_delta(struct task_struct *p, u64 delta) {
 		return delta * (p->weight + 1);
 	}
 }
-void update_curr(struct task_struct *p) {
+u64 update_curr(struct task_struct *p) {
 
 	u64 clock = grq.niffies;
 	u64 delta = clock - p->exec_start;
@@ -1034,6 +1037,7 @@ void update_curr(struct task_struct *p) {
 	}
 	p->deadline += nice_delta(p, delta);
 	p->exec_start = clock;
+	return traffic_to_delta;
 }
 
 void update_running_deadline(void) {
@@ -1043,9 +1047,16 @@ void update_running_deadline(void) {
 		struct task_struct* p = rq->curr;
 		// printk("update_running_deadline pid %d cpu %d\n", p->pid, i);
 		if(p == NULL || p == rq->idle) continue;
-		update_curr(p);
+		u64 traffic = update_curr(p);
 		dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 	}
+}
+
+u64 base_deadline(struct task_struct *p) {
+	if(p->deadline > grq.global_deadline - ACTIVATE_DELTA_DIFF) {
+		return p->deadline;
+	}
+	else return grq.global_deadline - ACTIVATE_DELTA_DIFF;
 }
 /*
  * activate_task - move a task to the runqueue. Enter with grq locked.
@@ -1055,16 +1066,16 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	update_clocks(rq);
 	u64 global_deadline = global_rq_deadline();
 	u64 traffic_to_delta = read_traffic_delta(p);
-	p->deadline += nice_delta(p, traffic_to_delta);
-	if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
-		p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
-
+	// p->deadline += nice_delta(p, traffic_to_delta);
+	// if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
+	// 	p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
+	p->deadline = base_deadline(p) + nice_delta(p, traffic_to_delta);
 	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 	p->is_wakeup = 1;
 	if(traffic_to_delta != 0 && BFS_DEBUG)
 		printk("pid %d Added traffic delta %lld ddl %lld\n",p->pid, traffic_to_delta, p->deadline);
 	
-	
+
 	update_running_deadline();
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
@@ -3221,14 +3232,27 @@ static inline void check_deadline(struct task_struct *p)
 {
 	struct rq *rq = cpu_rq(smp_processor_id());
 	u64 prev_deadline = p->deadline;
-	update_curr(p);
+	int i;
+	for(i = 0; i < 4; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* rq_task = rq->curr;
+		if(rq_task == NULL || rq_task == rq->idle) continue;
+		update_curr(rq_task);
+		u64 traffic = update_curr(rq_task);
+	}
 
 	u64 global_deadline = global_rq_deadline();
 	if(p->deadline > global_deadline + MAX_DELTA_DIFF)
 		p->deadline = global_deadline + MAX_DELTA_DIFF;
 	if(p->deadline < prev_deadline)
 		p->deadline = prev_deadline;
-	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
+	for(i = 0; i < 4; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* rq_task = rq->curr;
+		if(rq_task == NULL || rq_task == rq->idle) continue;
+		dram_regs->virtualTime_pid[rq_task->pid] = getVirtualTimeOffset(rq_task);
+	}
+	// dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 
 	
 	if(rq->rq_deadline <= p->deadline)
@@ -3323,7 +3347,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		if (!sched_interactive) {
 			int tcpu;
 			if ((tcpu = task_cpu(p)) != cpu) {
-				u64 dl = p->deadline; // << locality_diff(tcpu, rq);
+				u64 dl = p->deadline + 4000000 * locality_diff(tcpu, rq);
 
 				if (!deadline_before(dl, earliest_deadline))
 					continue;
