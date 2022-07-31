@@ -3364,7 +3364,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 	}
 	if(edt->is_wakeup) {
 		u64 saturation = dram_regs->saturation;
-		if(unlikely((edt->deadline > grq.global_deadline + 20000000) && saturation > 90)) {
+		if(unlikely((edt->deadline > grq.global_deadline + 20000000) && all_idle() )) {
 			// printk("delayed pid %d\n", edt->pid);
 			return idle;
 		} else {
