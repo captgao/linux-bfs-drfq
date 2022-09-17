@@ -1066,10 +1066,10 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	update_running_deadline();
 	u64 global_deadline = global_rq_deadline();
 	u64 traffic_to_delta = read_traffic_delta(p);
-	// p->deadline += nice_delta(p, traffic_to_delta);
-	// if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
-	// 	p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
-	p->deadline = base_deadline(p) + nice_delta(p, traffic_to_delta);
+	p->deadline += nice_delta(p, traffic_to_delta);
+	if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
+		p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
+	// p->deadline = base_deadline(p) + nice_delta(p, traffic_to_delta);
 	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 	p->is_wakeup = 1;
 	if(traffic_to_delta != 0 && BFS_DEBUG)
@@ -3366,7 +3366,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 	if(edt->is_wakeup) {
 		u64 saturation = dram_regs->saturation;
 		if(unlikely((edt->deadline > grq.global_deadline + 20000000) && !all_idle() )) {
-			printk("delayed pid %d\n", edt->pid);
+			// printk("delayed pid %d\n", edt->pid);
 			return idle;
 		} else {
 			edt->is_wakeup = 0;
