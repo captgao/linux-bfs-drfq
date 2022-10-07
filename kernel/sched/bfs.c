@@ -136,6 +136,7 @@
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
 #define MAX_DELTA_DIFF 40000000
 #define ACTIVATE_DELTA_DIFF 40000000
+#define NUM_CPUS 4
 struct DRAMRegs* dram_regs = NULL;
 #define BFS_DEBUG 0
 void print_scheduler_version(void)
@@ -985,7 +986,7 @@ u64 global_rq_deadline(void) {
 	// 		maxddl = p->deadline;
 	// }
 	int i;
-	for(i = 0; i < 4; i++) {
+	for(i = 0; i < NUM_CPUS; i++) {
 		struct rq* rq = cpu_rq(i);
 		struct task_struct* p = rq->curr;
 		if(p == NULL || p == rq->idle) continue;
@@ -1021,18 +1022,8 @@ u64 update_curr(struct task_struct *p) {
 		delta = 0;
 	}
 	u64 traffic_to_delta = read_traffic_delta(p);
-	// if(p->pid > 810) {
-	// 	printk("pid %d grq %lld delta %lld traffic_to_delta %lld\n",
-	// 		p->pid, grq.niffies, delta, traffic_to_delta);
-	// }
-	// if(delta > 3000000 )//&& BFS_DEBUG) 
-	// 		printk("pid %d Delta from CPU %lld ddl %lld, while traffic %lld\n"
-	// 			, p->pid, delta, p->deadline + delta, traffic_to_delta);
-	// max bandwidth 4.267 B/s, 1 delta  = 1.5ns, n_cpus = 4, so traffic * 5/8 to delta
 	if(traffic_to_delta > delta) {
 		delta = traffic_to_delta;
-		// if(BFS_DEBUG)
-		// printk("pid %d Delta from mem %lld ddl %lld\n", p->pid, delta, p->deadline + delta);
 	}
 	p->deadline += nice_delta(p, delta);
 	p->exec_start = clock;
@@ -1041,10 +1032,9 @@ u64 update_curr(struct task_struct *p) {
 
 void update_running_deadline(void) {
 	int i;
-	for(i = 0; i < 4; i++) {
+	for(i = 0; i < NUM_CPUS; i++) {
 		struct rq* rq = cpu_rq(i);
 		struct task_struct* p = rq->curr;
-		// printk("update_running_deadline pid %d cpu %d\n", p->pid, i);
 		if(p == NULL || p == rq->idle) continue;
 		u64 traffic = update_curr(p);
 		dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
@@ -1856,7 +1846,6 @@ void wake_up_new_task(struct task_struct *p)
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	dram_regs->traffic[p->pid] = 0;
 	dram_regs->virtualTime_pid[p->pid] =getVirtualTimeOffset(p);
-	// printk("new task ddl %lld pid %d cpu %d\n", p->deadline, p->pid, smp_processor_id());
 	/* The new task might not be able to run on the same CPU as rq->curr */
 	if (unlikely(needs_other_cpu(p, task_cpu(p)))) {
 		set_task_cpu(p, cpumask_any(tsk_cpus_allowed(p)));
@@ -2136,8 +2125,6 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
-	// printk("ddl: prev(%d) %lld next(%d) %lld\n", prev->pid, prev->deadline,
-	//  next->pid,next->deadline);
 	prepare_task_switch(rq, prev, next);
 
 	mm = next->mm;
@@ -3199,6 +3186,27 @@ static inline void preempt_latency_stop(int val) { }
 static void time_slice_expired(struct task_struct *p)
 {
 	p->time_slice = timeslice();
+	u64 prev_deadline = p->deadline;
+	int i;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* rq_task = rq->curr;
+		if(rq_task == NULL || rq_task == rq->idle) continue;
+		update_curr(rq_task);
+		u64 traffic = update_curr(rq_task);
+	}
+
+	u64 global_deadline = global_rq_deadline();
+	if(p->deadline > global_deadline + MAX_DELTA_DIFF)
+		p->deadline = global_deadline + MAX_DELTA_DIFF;
+	if(p->deadline < prev_deadline)
+		p->deadline = prev_deadline;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* rq_task = rq->curr;
+		if(rq_task == NULL || rq_task == rq->idle) continue;
+		dram_regs->virtualTime_pid[rq_task->pid] = getVirtualTimeOffset(rq_task);
+	}
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;
@@ -3230,27 +3238,7 @@ static void time_slice_expired(struct task_struct *p)
 static inline void check_deadline(struct task_struct *p)
 {
 	struct rq *rq = cpu_rq(smp_processor_id());
-	u64 prev_deadline = p->deadline;
-	int i;
-	for(i = 0; i < 4; i++) {
-		struct rq* rq = cpu_rq(i);
-		struct task_struct* rq_task = rq->curr;
-		if(rq_task == NULL || rq_task == rq->idle) continue;
-		update_curr(rq_task);
-		u64 traffic = update_curr(rq_task);
-	}
 
-	u64 global_deadline = global_rq_deadline();
-	if(p->deadline > global_deadline + MAX_DELTA_DIFF)
-		p->deadline = global_deadline + MAX_DELTA_DIFF;
-	if(p->deadline < prev_deadline)
-		p->deadline = prev_deadline;
-	for(i = 0; i < 4; i++) {
-		struct rq* rq = cpu_rq(i);
-		struct task_struct* rq_task = rq->curr;
-		if(rq_task == NULL || rq_task == rq->idle) continue;
-		dram_regs->virtualTime_pid[rq_task->pid] = getVirtualTimeOffset(rq_task);
-	}
 	// dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
 
 	
@@ -3311,7 +3299,7 @@ found_middle:
 }
 bool all_idle(void) {
 	int i;
-	for(i = 0; i < 4; i++) {
+	for(i = 0; i < NUM_CPUS; i++) {
 		struct rq* rq = cpu_rq(i);
 		if(rq == NULL) continue;
 		if(rq->curr == NULL || rq->curr == rq->idle) continue;
@@ -3347,7 +3335,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		if (!sched_interactive) {
 			int tcpu;
 			if ((tcpu = task_cpu(p)) != cpu) {
-				u64 dl = p->deadline + 4000000 * locality_diff(tcpu, rq);
+				u64 dl = p->deadline + 4L * locality_diff(tcpu, rq);
 
 				if (!deadline_before(dl, earliest_deadline))
 					continue;
@@ -3366,7 +3354,6 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 	if(edt->is_wakeup) {
 		u64 saturation = dram_regs->saturation;
 		if(unlikely((edt->deadline > grq.global_deadline + 20000000) && !all_idle() )) {
-			// printk("delayed pid %d\n", edt->pid);
 			return idle;
 		} else {
 			edt->is_wakeup = 0;
@@ -3627,13 +3614,6 @@ static void __sched notrace __schedule(bool preempt)
 	if (idle != prev) {
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
-		// if(rq->rq_deadline <= prev->deadline) {
-		// 	rq->rq_deadline = prev->deadline;
-		// } else {
-		// 	printk("in __schedule cpu %d pid %d rq->ddl %lld prev->ddl %lld\n",
-		// 		smp_processor_id(), prev->pid, rq->rq_deadline, prev->deadline);
-		// }
-		// printk("rq with prev->deadline %lld pid%d cpu%d\n", rq->rq_deadline, prev->pid, smp_processor_id());
 		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
 		return_task(prev, rq, deactivate);
