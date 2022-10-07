@@ -1,6 +1,7 @@
 #!/bin/sh
 rm vmlinux
+# rm /home/z99gao/simplessd-fullsystem/build/ARM/binaries/vmlinux
+rm /home/z99gao/gem5-sched/build/ARM/binaries/vmlinux
 ARCH=arm64 CROSS_COMPILE=/home/z99gao/gcc-aarch64/bin/aarch64-none-linux-gnu- make vmlinux -j16
-rm /home/z99gao/simplessd-fullsystem/build/ARM/binaries/vmlinux
-cp vmlinux /home/z99gao/simplessd-fullsystem/build/ARM/binaries/
+# cp vmlinux /home/z99gao/simplessd-fullsystem/build/ARM/binaries/
 cp vmlinux /home/z99gao/gem5-sched/build/ARM/binaries/

@@ -48,6 +48,7 @@
 #include <linux/fs_struct.h>
 #include <linux/init_task.h>
 #include <linux/perf_event.h>
+#include <linux/sched.h>
 #include <trace/events/sched.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/oom.h>
@@ -728,6 +729,8 @@ static inline void check_stack_usage(void) {}
 void do_exit(long code)
 {
 	struct task_struct *tsk = current;
+	printk("pid %d ended with traffic %lld, blk traffic %lld, at %lld\n", current->pid, 
+		current->traffic, current->blk_traffic, scheduler_time());
 	int group_dead;
 	TASKS_RCU(int tasks_rcu_i);
 

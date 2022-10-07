@@ -4,7 +4,7 @@
 
 #ifndef BFS_SCHED_H
 #define BFS_SCHED_H
-
+#define CONFIG_SMP
 /*
  * This is the main, per-CPU runqueue data structure.
  * This data should only be modified by the local cpu.
@@ -14,6 +14,7 @@ struct DRAMRegs {
 	s64 virtualTime_pid[8192];
 	s64 virtualTime_coreId[4];
 	u64 pid_coreId[4];
+	u64 saturation;
 };
 
 struct rq {

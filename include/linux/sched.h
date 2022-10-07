@@ -1476,13 +1476,18 @@ struct task_struct {
 #endif
 	int on_rq;
 	int prio, static_prio, normal_prio;
+	int weight;
+	int is_wakeup;
 	unsigned int rt_priority;
 #ifdef CONFIG_SCHED_BFS
 	int time_slice;
 	u64 deadline;
 	skiplist_node node; /* Skip list node */
 	u64 last_ran;
+	u64 exec_start;
 	u64 sched_time; /* sched_clock time spent running */
+	u64 traffic;
+	u64 blk_traffic;
 #ifdef CONFIG_SMT_NICE
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif
@@ -3532,5 +3537,5 @@ void cpufreq_add_update_util_hook(int cpu, struct update_util_data *data,
 				     unsigned long util, unsigned long max));
 void cpufreq_remove_update_util_hook(int cpu);
 #endif /* CONFIG_CPU_FREQ */
-
+u64 scheduler_time(void);
 #endif

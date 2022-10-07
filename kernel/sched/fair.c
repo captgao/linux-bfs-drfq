@@ -430,22 +430,21 @@ void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec);
  * Scheduling class tree data structure manipulation methods:
  */
 
-static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
+static inline u64 max_vruntime(u64 a, u64 b)
 {
-	s64 delta = (s64)(vruntime - max_vruntime);
+	s64 delta = (s64)(b - a);
 	if (delta > 0)
-		max_vruntime = vruntime;
-
-	return max_vruntime;
+		a = b;
+	return a;
 }
 
-static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime)
+static inline u64 min_vruntime(u64 a, u64 b)
 {
-	s64 delta = (s64)(vruntime - min_vruntime);
+	s64 delta = (s64)(b - a);
 	if (delta < 0)
-		min_vruntime = vruntime;
+		a = b;
 
-	return min_vruntime;
+	return a;
 }
 
 static inline int entity_before(struct sched_entity *a,
@@ -456,10 +455,10 @@ static inline int entity_before(struct sched_entity *a,
 
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
-	u64 vruntime = cfs_rq->min_vruntime;
+	u64 _vruntime = cfs_rq->min_vruntime;
 
 	if (cfs_rq->curr)
-		vruntime = cfs_rq->curr->vruntime;
+		_vruntime = cfs_rq->curr->vruntime;
 
 	if (cfs_rq->rb_leftmost) {
 		struct sched_entity *se = rb_entry(cfs_rq->rb_leftmost,
@@ -467,13 +466,13 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 						   run_node);
 
 		if (!cfs_rq->curr)
-			vruntime = se->vruntime;
+			_vruntime = se->vruntime;
 		else
-			vruntime = min_vruntime(vruntime, se->vruntime);
+			_vruntime = min_vruntime(_vruntime, se->vruntime);
 	}
 
 	/* ensure we never gain time by being placed backwards. */
-	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
+	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, _vruntime);
 #ifndef CONFIG_64BIT
 	smp_wmb();
 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
@@ -646,7 +645,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 
 /*
- * We calculate the vruntime slice of a to-be-inserted task.
+ * We calculate the _vruntime_ slice of a to-be-inserted task.
  *
  * vs = s/w
  */
@@ -3248,20 +3247,20 @@ static void enqueue_sleeper(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 #ifdef CONFIG_SCHED_DEBUG
-	s64 d = se->vruntime - cfs_rq->min_vruntime;
+	// s64 d = se->_vruntime_ - cfs_rq->min_vruntime;
 
-	if (d < 0)
-		d = -d;
+	// if (d < 0)
+	// 	d = -d;
 
-	if (d > 3*sysctl_sched_latency)
-		schedstat_inc(cfs_rq, nr_spread_over);
+	// if (d > 3*sysctl_sched_latency)
+	// 	schedstat_inc(cfs_rq, nr_spread_over);
 #endif
 }
 
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
-	u64 vruntime = cfs_rq->min_vruntime;
+	u64 _vruntime = cfs_rq->min_vruntime;
 
 	/*
 	 * The 'current' period is already promised to the current tasks,
@@ -3270,7 +3269,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	 * stays open at the end.
 	 */
 	if (initial && sched_feat(START_DEBIT))
-		vruntime += sched_vslice(cfs_rq, se);
+		_vruntime += sched_vslice(cfs_rq, se);
 
 	/* sleeps up to a single latency don't count. */
 	if (!initial) {
@@ -3283,11 +3282,11 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		if (sched_feat(GENTLE_FAIR_SLEEPERS))
 			thresh >>= 1;
 
-		vruntime -= thresh;
+		_vruntime -= thresh;
 	}
 
 	/* ensure we never gain time by being placed backwards. */
-	se->vruntime = max_vruntime(se->vruntime, vruntime);
+	se->vruntime = max_vruntime(se->vruntime, _vruntime);
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
@@ -3319,25 +3318,25 @@ static inline void check_schedstat_required(void)
  *	dequeue
  *	  update_curr()
  *	    update_min_vruntime()
- *	  vruntime -= min_vruntime
+ *	  _vruntime_ -= min_vruntime
  *
  *	enqueue
  *	  update_curr()
  *	    update_min_vruntime()
- *	  vruntime += min_vruntime
+ *	  _vruntime_ += min_vruntime
  *
- * this way the vruntime transition between RQs is done when both
+ * this way the _vruntime_ transition between RQs is done when both
  * min_vruntime are up-to-date.
  *
  * WAKEUP (remote)
  *
  *	->migrate_task_rq_fair() (p->state == TASK_WAKING)
- *	  vruntime -= min_vruntime
+ *	  _vruntime_ -= min_vruntime
  *
  *	enqueue
  *	  update_curr()
  *	    update_min_vruntime()
- *	  vruntime += min_vruntime
+ *	  _vruntime_ += min_vruntime
  *
  * this way we don't have the most up-to-date min_vruntime on the originating
  * CPU and an up-to-date min_vruntime on the destination CPU.
@@ -5464,7 +5463,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 static void migrate_task_rq_fair(struct task_struct *p)
 {
 	/*
-	 * As blocked tasks retain absolute vruntime the migration needs to
+	 * As blocked tasks retain absolute _vruntime_ the migration needs to
 	 * deal with this by subtracting the old and adding the new
 	 * min_vruntime -- the latter is done by enqueue_entity() when placing
 	 * the task on the new runqueue.
@@ -8422,7 +8421,7 @@ static inline bool vruntime_normalized(struct task_struct *p)
 		return true;
 
 	/*
-	 * When !on_rq, vruntime of the task has usually NOT been normalized.
+	 * When !on_rq, _vruntime_ of the task has usually NOT been normalized.
 	 * But there are some cases where it has already been normalized:
 	 *
 	 * - A forked child which is waiting for being woken up by
@@ -8445,7 +8444,7 @@ static void detach_task_cfs_rq(struct task_struct *p)
 
 	if (!vruntime_normalized(p)) {
 		/*
-		 * Fix up our vruntime so that the current sleep doesn't
+		 * Fix up our _vruntime_ so that the current sleep doesn't
 		 * cause 'unlimited' sleep bonus.
 		 */
 		place_entity(cfs_rq, se, 0);

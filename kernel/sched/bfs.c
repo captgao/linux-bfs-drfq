@@ -24,7 +24,7 @@
  *  2007-07-01  Group scheduling enhancements by Srivatsa Vaddagiri
  *  2007-11-29  RT balancing improvements by Steven Rostedt, Gregory Haskins,
  *              Thomas Gleixner, Mike Kravetz
- *  2009-08-13	Brainfuck deadline scheduling policy by Con Kolivas deletes
+ *  2009-08-13	Brainfuck _deadline_ scheduling policy by Con Kolivas deletes
  *              a whole lot of those previous things.
  */
 
@@ -132,11 +132,13 @@
 #define MS_TO_US(TIME)		((TIME) << 10)
 #define NS_TO_MS(TIME)		((TIME) >> 20)
 #define NS_TO_US(TIME)		((TIME) >> 10)
-
+#define CONFIG_SMP
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
-
+#define MAX_DELTA_DIFF 40000000
+#define ACTIVATE_DELTA_DIFF 40000000
+#define NUM_CPUS 4
 struct DRAMRegs* dram_regs = NULL;
-
+#define BFS_DEBUG 0
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS CPU scheduler v0.512 by Con Kolivas.\n");
@@ -162,7 +164,7 @@ int sched_interactive __read_mostly = 1;
 int sched_iso_cpu __read_mostly = 70;
 
 /*
- * The relative length of deadline for each priority(nice) level.
+ * The relative length of _deadline_ for each priority(nice) level.
  */
 static int prio_ratios[NICE_WIDTH] __read_mostly;
 
@@ -197,7 +199,7 @@ struct global_rq {
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
-
+	u64 global_deadline;
 	skiplist_node node;
 	skiplist *sl;
 };
@@ -269,7 +271,9 @@ int __weak arch_sd_sibling_asym_packing(void)
 #else
 struct rq *uprq;
 #endif /* CONFIG_SMP */
-
+u64 scheduler_time(void) {
+	return grq.niffies;
+}
 static inline void update_rq_clock(struct rq *rq);
 
 /*
@@ -293,6 +297,10 @@ static inline void niffy_diff(s64 *niff_diff, int jiff_diff)
 		*niff_diff = min_diff;
 }
 
+s64 getVirtualTimeOffset(struct task_struct *p) {
+	//return (s64)(p->deadline - grq.global_deadline) * 1500;
+	return p->deadline >> 22; // * 1500;
+}
 #ifdef CONFIG_SMP
 static inline int cpu_of(struct rq *rq)
 {
@@ -471,23 +479,30 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	grq_unlock_irq();
 }
 
-static inline bool deadline_before(u64 deadline, u64 time)
+static inline bool deadline_before(u64 a, u64 time)
 {
-	return (deadline < time);
+	return (a < time);
 }
 
-static inline bool deadline_after(u64 deadline, u64 time)
+static inline bool deadline_after(u64 a, u64 time)
 {
-	return (deadline > time);
+	return (a > time);
 }
 
+static inline u64 read_traffic_delta(struct task_struct* p) {
+	if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	u64 traffic = dram_regs->traffic[p->pid];
+	p->traffic += traffic;
+	return traffic;
+}
 /*
- * Deadline is "now" in niffies + (offset by priority). Setting the deadline
+ * _Deadline_ is "now" in niffies + (offset by priority). Setting the _deadline_
  * is the key to everything. It distributes cpu fairly amongst tasks of the
  * same nice value, it proportions cpu according to nice level, it means the
- * task that last woke up the longest ago has the earliest deadline, thus
+ * task that last woke up the longest ago has the earliest _deadline_, thus
  * ensuring that interactive tasks get low latency on wake up. The CPU
- * proportion works out to the square of the virtual deadline difference, so
+ * proportion works out to the square of the virtual _deadline_ difference, so
  * this equation will give nice 19 3% CPU compared to nice 0.
  */
 static inline u64 prio_deadline_diff(int user_prio)
@@ -587,7 +602,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	 * according to priority. The skiplist will put tasks of the same
 	 * key inserted later in FIFO order. Tasks of sched normal, batch
 	 * and idleprio are sorted according to their deadlines. Idleprio
-	 * tasks are offset by an impossibly large deadline value ensuring
+	 * tasks are offset by an impossibly large _deadline_ value ensuring
 	 * they get sorted into last positions, but still according to their
 	 * own deadlines. This creates a "landscape" of skiplists running
 	 * from priority 0 realtime in first place to the lowest priority
@@ -620,8 +635,8 @@ static inline void requeue_task(struct task_struct *p)
 }
 
 /*
- * Returns the relative length of deadline all compared to the shortest
- * deadline which is that of nice -20.
+ * Returns the relative length of _deadline_ all compared to the shortest
+ * _deadline_ which is that of nice -20.
  */
 static inline int task_prio_ratio(struct task_struct *p)
 {
@@ -674,7 +689,7 @@ static unsigned long rq_load_avg(struct rq *rq)
 static const cpumask_t *thread_cpumask(int cpu);
 
 /* Find the best real time priority running on any SMT siblings of cpu and if
- * none are running, the static priority of the best deadline task running.
+ * none are running, the static priority of the best _deadline_ task running.
  * The lookups to the other runqueues is done lockless as the occasional wrong
  * value would be harmless. */
 static int best_smt_bias(struct rq *this_rq)
@@ -872,7 +887,10 @@ static inline void resched_suitable_idle(struct task_struct *p)
 
 static inline int locality_diff(int cpu, struct rq *rq)
 {
-	return rq->cpu_locality[cpu];
+	// return rq->cpu_locality[cpu];
+	if(rq == cpu_rq(cpu))
+		return 0;
+	else return 10;
 }
 #else /* CONFIG_SMP */
 static inline void set_cpuidle_map(int cpu)
@@ -948,13 +966,105 @@ static void update_load_avg(struct rq *rq)
 	}
 	rq->load_update = rq->clock;
 }
+//get min_vruntime, enter with grq lock
+u64 global_rq_deadline(void) {	
 
+	u64 _deadline = 0xFFFFFFFFFFFFFFFFUL;
+	int pid = -1;
+	// u64 maxddl = 0;
+	// while ((node = node->next[0]) != &grq.node) {
+	// 	struct task_struct *p = node->value;
+	// 	if(p == NULL)
+	// 		continue;
+	// 	if(p->state != TASK_RUNNING)
+	// 		continue;
+	// 	if(p->deadline < _deadline && p->deadline > grq.global_deadline) {
+	// 		_deadline = p->deadline;
+	// 		pid = p->pid;
+	// 	}
+	// 	if(p->deadline > maxddl)
+	// 		maxddl = p->deadline;
+	// }
+	int i;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* p = rq->curr;
+		if(p == NULL || p == rq->idle) continue;
+		if(p->deadline < _deadline) {
+			_deadline = p->deadline;
+			pid = p->pid;
+		}
+	}
+	_deadline += 1;
+	if(_deadline > grq.global_deadline)
+		grq.global_deadline = _deadline;
+	if(pid != -1 && BFS_DEBUG)
+		printk("_deadline %lld global rq_deadline %lld from pid  %d\n", _deadline, grq.global_deadline, pid);
+	return grq.global_deadline;
+}
+
+u64 nice_delta(struct task_struct *p, u64 delta) {
+	if(p->weight == 0) {
+		return delta;
+	} else if(p->weight < 0) {
+		int x = 0 - p->weight + 1;
+		return delta / x;
+	} else {
+		return delta * (p->weight + 1);
+	}
+}
+u64 update_curr(struct task_struct *p) {
+
+	u64 clock = grq.niffies;
+	u64 delta = clock - p->exec_start;
+	if(delta < 0) {
+		printk("pid %d delta %lld\n", p->pid, delta);
+		delta = 0;
+	}
+	u64 traffic_to_delta = read_traffic_delta(p);
+	if(traffic_to_delta > delta) {
+		delta = traffic_to_delta;
+	}
+	p->deadline += nice_delta(p, delta);
+	p->exec_start = clock;
+	return traffic_to_delta;
+}
+
+void update_running_deadline(void) {
+	int i;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* p = rq->curr;
+		if(p == NULL || p == rq->idle) continue;
+		u64 traffic = update_curr(p);
+		dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
+	}
+}
+
+u64 base_deadline(struct task_struct *p) {
+	if(p->deadline > grq.global_deadline - ACTIVATE_DELTA_DIFF) {
+		return p->deadline;
+	}
+	else return grq.global_deadline - ACTIVATE_DELTA_DIFF;
+}
 /*
  * activate_task - move a task to the runqueue. Enter with grq locked.
  */
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
 	update_clocks(rq);
+	update_running_deadline();
+	u64 global_deadline = global_rq_deadline();
+	u64 traffic_to_delta = read_traffic_delta(p);
+	p->deadline += nice_delta(p, traffic_to_delta);
+	if(p->deadline < (global_deadline - ACTIVATE_DELTA_DIFF))
+		p->deadline = global_deadline - ACTIVATE_DELTA_DIFF;
+	// p->deadline = base_deadline(p) + nice_delta(p, traffic_to_delta);
+	dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
+	p->is_wakeup = 1;
+	if(traffic_to_delta != 0 && BFS_DEBUG)
+		printk("pid %d Added traffic delta %lld ddl %lld\n",p->pid, traffic_to_delta, p->deadline);
+	
 
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
@@ -1239,15 +1349,15 @@ EXPORT_SYMBOL_GPL(kick_process);
  * prio PRIO_LIMIT so it is always preempted.
  */
 static inline bool
-can_preempt(struct task_struct *p, int prio, u64 deadline)
+can_preempt(struct task_struct *p, int prio, u64 ddl)
 {
 	/* Better static priority RT task or better policy preemption */
 	if (p->prio < prio)
 		return true;
 	if (p->prio > prio)
 		return false;
-	/* SCHED_NORMAL, BATCH and ISO will preempt based on deadline */
-	if (!deadline_before(p->deadline, deadline))
+	/* SCHED_NORMAL, BATCH and ISO will preempt based on _deadline_ */
+	if (!deadline_before(p->deadline, ddl))
 		return false;
 	return true;
 }
@@ -1588,7 +1698,11 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->stimescaled =
 	p->sched_time =
 	p->stime_pc =
-	p->utime_pc = 0;
+	p->utime_pc =
+	p->blk_traffic =
+	p->weight = 
+	p->is_wakeup =
+	p->traffic = 0;
 	skiplist_node_init(&p->node);
 
 	/*
@@ -1724,11 +1838,14 @@ void wake_up_new_task(struct task_struct *p)
 	p->state = TASK_RUNNING;
 
 	/*
-	 * Reinit new task deadline as its creator deadline could have changed
+	 * Reinit new task _deadline_ as its creator _deadline_ could have changed
 	 * since call to dup_task_struct().
 	 */
-	p->deadline = rq->rq_deadline;
-
+	p->deadline = global_rq_deadline();
+	if(dram_regs == NULL) 
+		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
+	dram_regs->traffic[p->pid] = 0;
+	dram_regs->virtualTime_pid[p->pid] =getVirtualTimeOffset(p);
 	/* The new task might not be able to run on the same CPU as rq->curr */
 	if (unlikely(needs_other_cpu(p, task_cpu(p)))) {
 		set_task_cpu(p, cpumask_any(tsk_cpus_allowed(p)));
@@ -1750,8 +1867,8 @@ void wake_up_new_task(struct task_struct *p)
 	 * resulting in more scheduling fairness. If it's negative, it won't
 	 * matter since that's the same as being 0. current's time_slice is
 	 * actually in rq_time_slice when it's running, as is its last_ran
-	 * value. rq->rq_deadline is only modified within schedule() so it
-	 * is always equal to current->deadline.
+	 * value. rq->_rq_deadline is only modified within schedule() so it
+	 * is always equal to current->_deadline_.
 	 */
 	p->last_ran = rq->rq_last_ran;
 	if (likely(rq_curr->policy != SCHED_FIFO)) {
@@ -1759,8 +1876,8 @@ void wake_up_new_task(struct task_struct *p)
 		if (unlikely(rq->rq_time_slice < RESCHED_US)) {
 			/*
 			 * Forking task has run out of timeslice. Reschedule it and
-			 * start its child with a new time slice and deadline. The
-			 * child will end up running first because its deadline will
+			 * start its child with a new time slice and _deadline_. The
+			 * child will end up running first because its _deadline_ will
 			 * be slightly earlier.
 			 */
 			rq->rq_time_slice = 0;
@@ -2008,7 +2125,6 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
-
 	prepare_task_switch(rq, prev, next);
 
 	mm = next->mm;
@@ -2038,9 +2154,12 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * do an early lockdep release here:
 	 */
 	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
+	prev->on_cpu = 0;
+	next->on_cpu = 1;
 	if(dram_regs == NULL) 
 		dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	dram_regs->pid_coreId[smp_processor_id()] = next->pid;
+	dram_regs->virtualTime_coreId[smp_processor_id()] = getVirtualTimeOffset(next);
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
@@ -3062,12 +3181,32 @@ static inline void preempt_latency_stop(int val) { }
 
 /*
  * The time_slice is only refilled when it is empty and that is when we set a
- * new deadline.
+ * new _deadline_.
  */
 static void time_slice_expired(struct task_struct *p)
 {
 	p->time_slice = timeslice();
-	p->deadline = grq.niffies + task_deadline_diff(p);
+	u64 prev_deadline = p->deadline;
+	int i;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* rq_task = rq->curr;
+		if(rq_task == NULL || rq_task == rq->idle) continue;
+		update_curr(rq_task);
+		u64 traffic = update_curr(rq_task);
+	}
+
+	u64 global_deadline = global_rq_deadline();
+	if(p->deadline > global_deadline + MAX_DELTA_DIFF)
+		p->deadline = global_deadline + MAX_DELTA_DIFF;
+	if(p->deadline < prev_deadline)
+		p->deadline = prev_deadline;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		struct task_struct* rq_task = rq->curr;
+		if(rq_task == NULL || rq_task == rq->idle) continue;
+		dram_regs->virtualTime_pid[rq_task->pid] = getVirtualTimeOffset(rq_task);
+	}
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;
@@ -3090,14 +3229,24 @@ static void time_slice_expired(struct task_struct *p)
  * point rescheduling when there's so little time left. SCHED_BATCH tasks
  * have been flagged be not latency sensitive and likely to be fully CPU
  * bound so every time they're rescheduled they have their time_slice
- * refilled, but get a new later deadline to have little effect on
+ * refilled, but get a new later _deadline_ to have little effect on
  * SCHED_NORMAL tasks.
 
  */
+
+
 static inline void check_deadline(struct task_struct *p)
 {
-	if (p->time_slice < RESCHED_US || batch_task(p))
+	struct rq *rq = cpu_rq(smp_processor_id());
+
+	// dram_regs->virtualTime_pid[p->pid] = getVirtualTimeOffset(p);
+
+	
+	if(rq->rq_deadline <= p->deadline)
+		rq->rq_deadline = p->deadline;
+	if (p->time_slice < RESCHED_US || batch_task(p)) {
 		time_slice_expired(p);
+	}
 }
 
 #define BITOP_WORD(nr)		((nr) / BITS_PER_LONG)
@@ -3148,7 +3297,17 @@ found_first:
 found_middle:
 	return result + __ffs(tmp);
 }
-
+bool all_idle(void) {
+	int i;
+	for(i = 0; i < NUM_CPUS; i++) {
+		struct rq* rq = cpu_rq(i);
+		if(rq == NULL) continue;
+		if(rq->curr == NULL || rq->curr == rq->idle) continue;
+		return false;
+	}
+	printk("all idle %d\n");
+	return true;
+}
 /*
  * Task selection with skiplists is a simple matter of picking off the first
  * task in the sorted list, an O(1) operation. The only time it takes longer
@@ -3159,10 +3318,10 @@ found_middle:
 static inline struct
 task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 {
-	skiplist_node *node = &grq.node;
 	struct task_struct *edt = idle;
 	u64 earliest_deadline = ~0ULL;
 
+	skiplist_node *node = &grq.node;
 	while ((node = node->next[0]) != &grq.node) {
 		struct task_struct *p = node->value;
 
@@ -3175,23 +3334,30 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 
 		if (!sched_interactive) {
 			int tcpu;
-
 			if ((tcpu = task_cpu(p)) != cpu) {
-				u64 dl = p->deadline << locality_diff(tcpu, rq);
+				u64 dl = p->deadline + 4L * locality_diff(tcpu, rq);
 
 				if (!deadline_before(dl, earliest_deadline))
 					continue;
 				earliest_deadline = dl;
 				edt = p;
 				/* We continue even though we've found the earliest
-				 * deadline task as the locality offset means there
+				 * _deadline_ task as the locality offset means there
 				 * may be a better candidate after it. */
 				continue;
 			}
 		}
-		/* We've encountered the best deadline local task */
+		/* We've encountered the best _deadline_ local task */
 		edt = p;
 		break;
+	}
+	if(edt->is_wakeup) {
+		u64 saturation = dram_regs->saturation;
+		if(unlikely((edt->deadline > grq.global_deadline + 20000000) && !all_idle() )) {
+			return idle;
+		} else {
+			edt->is_wakeup = 0;
+		}
 	}
 	if (likely(edt != idle))
 		take_task(cpu, edt);
@@ -3256,7 +3422,6 @@ static inline void schedule_debug(struct task_struct *prev)
 static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
 	rq->rq_time_slice = p->time_slice;
-	rq->rq_deadline = p->deadline;
 	rq->rq_last_ran = p->last_ran = rq->clock_task;
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
@@ -3449,7 +3614,6 @@ static void __sched notrace __schedule(bool preempt)
 	if (idle != prev) {
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
-		prev->deadline = rq->rq_deadline;
 		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
 		return_task(prev, rq, deactivate);
@@ -3485,6 +3649,7 @@ static void __sched notrace __schedule(bool preempt)
 		grq.nr_switches++;
 		prev->on_cpu = false;
 		next->on_cpu = true;
+		next->exec_start = grq.niffies;
 		rq->curr = next;
 		++*switch_count;
 
@@ -3752,56 +3917,58 @@ out_unlock:
 #endif
 
 /*
- * Adjust the deadline for when the priority is to change, before it's
+ * Adjust the _deadline_ for when the priority is to change, before it's
  * changed.
  */
 static inline void adjust_deadline(struct task_struct *p, int new_prio)
 {
-	p->deadline += static_deadline_diff(new_prio) - task_deadline_diff(p);
+	// p->deadline += static_deadline_diff(new_prio) - task_deadline_diff(p);
 }
 
 void set_user_nice(struct task_struct *p, long nice)
 {
-	int new_static, old_static;
-	unsigned long flags;
-	struct rq *rq;
+	printk("set_user_nice pid %d nice %d\n", p->pid, (int)nice);
+	p->weight = (int)nice;
+// 	int new_static, old_static;
+// 	unsigned long flags;
+// 	struct rq *rq;
 
-	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
-		return;
-	new_static = NICE_TO_PRIO(nice);
-	/*
-	 * We have to be careful, if called from sys_setpriority(),
-	 * the task might be in the middle of scheduling on another CPU.
-	 */
-	rq = time_task_grq_lock(p, &flags);
-	/*
-	 * The RT priorities are set via sched_setscheduler(), but we still
-	 * allow the 'normal' nice value to be set - but as expected
-	 * it wont have any effect on scheduling until the task is
-	 * not SCHED_NORMAL/SCHED_BATCH:
-	 */
-	if (has_rt_policy(p)) {
-		p->static_prio = new_static;
-		goto out_unlock;
-	}
+// 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
+// 		return;
+// 	new_static = NICE_TO_PRIO(nice);
+// 	/*
+// 	 * We have to be careful, if called from sys_setpriority(),
+// 	 * the task might be in the middle of scheduling on another CPU.
+// 	 */
+// 	rq = time_task_grq_lock(p, &flags);
+// 	/*
+// 	 * The RT priorities are set via sched_setscheduler(), but we still
+// 	 * allow the 'normal' nice value to be set - but as expected
+// 	 * it wont have any effect on scheduling until the task is
+// 	 * not SCHED_NORMAL/SCHED_BATCH:
+// 	 */
+// 	if (has_rt_policy(p)) {
+// 		p->static_prio = new_static;
+// 		goto out_unlock;
+// 	}
 
-	adjust_deadline(p, new_static);
-	old_static = p->static_prio;
-	p->static_prio = new_static;
-	p->prio = effective_prio(p);
+// 	adjust_deadline(p, new_static);
+// 	old_static = p->static_prio;
+// 	p->static_prio = new_static;
+// 	p->prio = effective_prio(p);
 
-	if (task_queued(p)) {
-		dequeue_task(p);
-		enqueue_task(p, rq);
-		if (new_static < old_static)
-			try_preempt(p, rq);
-	} else if (task_running(p)) {
-		reset_rq_task(rq, p);
-		if (old_static < new_static)
-			resched_task(p);
-	}
-out_unlock:
-	task_grq_unlock(p, &flags);
+// 	if (task_queued(p)) {
+// 		dequeue_task(p);
+// 		enqueue_task(p, rq);
+// 		if (new_static < old_static)
+// 			try_preempt(p, rq);
+// 	} else if (task_running(p)) {
+// 		reset_rq_task(rq, p);
+// 		if (old_static < new_static)
+// 			resched_task(p);
+// 	}
+// out_unlock:
+// 	task_grq_unlock(p, &flags);
 }
 EXPORT_SYMBOL(set_user_nice);
 
@@ -3819,7 +3986,6 @@ int can_nice(const struct task_struct *p, const int nice)
 		capable(CAP_SYS_NICE));
 }
 
-#ifdef __ARCH_WANT_SYS_NICE
 
 /*
  * sys_nice - change the priority of the current process.
@@ -3837,6 +4003,11 @@ SYSCALL_DEFINE1(nice, int, increment)
 	 * We don't have to worry. Conceptually one call occurs first
 	 * and we have a single winner.
 	 */
+	printk("--------NICE SYSTEM CALL %d----------\n", current->pid);
+	current->weight = increment;
+	printk("pid %d weight set to %d", current->pid, current->weight);
+	return 0;
+
 
 	increment = clamp(increment, -NICE_WIDTH, NICE_WIDTH);
 	nice = task_nice(current) + increment;
@@ -3852,9 +4023,6 @@ SYSCALL_DEFINE1(nice, int, increment)
 	set_user_nice(current, nice);
 	return 0;
 }
-
-#endif
-
 /**
  * task_prio - return the priority value of a given task.
  * @p: the task in question.
@@ -4673,7 +4841,7 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
  * sys_sched_yield - yield the current processor to other threads.
  *
  * This function yields the current CPU to other tasks. It does this by
- * scheduling away the current task. If it still has the earliest deadline
+ * scheduling away the current task. If it still has the earliest _deadline_
  * it will be scheduled again as the next task.
  *
  * Return: 0.
@@ -4814,6 +4982,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	yielded = 1;
 	if (p->deadline > rq->rq_deadline)
 		p->deadline = rq->rq_deadline;
+	printk("In yield p->deadline %lld rq_deadline %lld", p->deadline, rq->rq_deadline);
 	p->time_slice += rq->rq_time_slice;
 	rq->rq_time_slice = 0;
 	if (p->time_slice > timeslice())
@@ -7057,6 +7226,7 @@ void __init sched_init_smp(void)
 			printk(KERN_DEBUG "BFS LOCALITY CPU %d to %d: %d\n", cpu, other_cpu, rq->cpu_locality[other_cpu]);
 		}
 	}
+	dram_regs = ioremap_nocache(0x2b800000, 0x40000);
 	sched_smp_initialized = true;
 }
 #else
@@ -7111,6 +7281,7 @@ void __init sched_init(void)
 	raw_spin_lock_init(&grq.lock);
 	grq.nr_running = grq.nr_uninterruptible = grq.nr_switches = 0;
 	grq.niffies = 0;
+	grq.global_deadline = ACTIVATE_DELTA_DIFF;
 	grq.last_jiffy = jiffies;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
